@@ -191,6 +191,7 @@ public:
     m_tls(*this, m_session_manager, m_creds, m_policy, m_rng),
     m_socket(remote)
   {
+    assert(m_socket);
     m_socket->on_read(8192, 
     [this] (auto buf, size_t n) {
       this->tls_receive(buf.get(), n);
@@ -237,7 +238,7 @@ public:
 
   void tls_record_received(uint64_t, const uint8_t buf[], size_t buf_len) override
   {
-    printf("Data received from %s:\n%.*s\n", m_socket->to_string().c_str(), buf_len, buf);
+    if (on_read) on_read(buf, buf_len);
   }
 
   void tls_session_activated() override
@@ -255,8 +256,17 @@ public:
     m_socket->close();
   }
 
+  std::string to_string() const {
+    return m_socket->to_string();
+  }
+
+  Connection_ptr get_connection() noexcept {
+    return m_socket;
+  }
+
 public:
   delegate<void(TLS_socket&)> on_connected;
+  delegate<void(const uint8_t[], size_t)> on_read = nullptr;
 private:
   Botan::RandomNumberGenerator& m_rng;
   Botan::Credentials_Manager&   m_creds;
@@ -314,10 +324,18 @@ void Service::start()
     {
       printf("New client from %s\n", client->to_string().c_str());
       auto* tls_client = new TLS_socket(client);
+
       tls_client->on_connected = 
-      [] (TLS_socket& socket) {
-        socket.write("<html><body>Hello world</body><html>\r\n");
-        socket.close();
+      [] (TLS_socket& socket)
+      {
+        socket.on_read =
+        [&socket] (const uint8_t buf[], size_t buf_len)
+        {
+          printf("Data received from %s:\n%.*s\n", socket.to_string().c_str(), buf_len, buf);
+          // send response
+          socket.write("<html><body>Hello world</body><html>\r\n");
+          socket.close();
+        };
       };
       g_apps[client->remote()].reset(tls_client);
 
