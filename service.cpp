@@ -196,6 +196,10 @@ public:
     [this] (auto buf, size_t n) {
       this->tls_receive(buf.get(), n);
     });
+    m_socket->on_disconnect(
+    [this] (auto, auto) {
+      if (on_disconnect) on_disconnect(*this);
+    });
   }
 
   void tls_receive(const uint8_t* buf, const size_t n)
@@ -260,12 +264,16 @@ public:
     return m_socket->to_string();
   }
 
-  Connection_ptr get_connection() noexcept {
+  auto get_connection() noexcept {
     return m_socket;
+  }
+  auto get_remote() noexcept {
+    return m_socket->remote();
   }
 
 public:
   delegate<void(TLS_socket&)> on_connected;
+  delegate<void(TLS_socket&)> on_disconnect;
   delegate<void(const uint8_t[], size_t)> on_read = nullptr;
 private:
   Botan::RandomNumberGenerator& m_rng;
@@ -278,7 +286,35 @@ private:
 };
 static std::map<net::tcp::Socket, std::unique_ptr<TLS_socket>> g_apps;
 
-extern "C" void kernel_sanity_checks();
+void new_client(Connection_ptr conn)
+{
+  printf("New client from %s\n", conn->to_string().c_str());
+  // create TLS socket
+  auto* tls_client = new TLS_socket(conn);
+  // add to map of sockets in application
+  g_apps[conn->remote()].reset(tls_client);
+
+  tls_client->on_connected = 
+  [] (TLS_socket& socket)
+  {
+    printf("Connected to %s\n", socket.to_string().c_str());
+  };
+
+  tls_client->on_read =
+  [tls_client] (const uint8_t buf[], size_t buf_len)
+  {
+    printf("Data received from %s:\n%.*s\n", tls_client->to_string().c_str(), buf_len, buf);
+    // send response
+    tls_client->write("<html><body>Hello world</body><html>\r\n");
+    tls_client->close();
+  };
+
+  tls_client->on_disconnect =
+  [] (TLS_socket& client) {
+    printf("Disconnected from %s\n", client.to_string().c_str());
+    g_apps.erase(client.get_remote());
+  };
+}
 
 std::unique_ptr<Botan::Private_Key> read_private_key(
       fs::File_system& fs, const std::string& filepath)
@@ -288,6 +324,8 @@ std::unique_ptr<Botan::Private_Key> read_private_key(
   Botan::DataSource_Memory data{key_file.data(), key_file.size()};
   return std::unique_ptr<Botan::Private_Key>(Botan::PKCS8::load_key(data, get_rng()));
 }
+
+extern "C" void kernel_sanity_checks();
 
 void Service::start()
 {
@@ -319,33 +357,7 @@ void Service::start()
 
     create_creds(std::move(ca_key), ca_cert, std::move(srv_key));
 
-    server.on_connect(
-    [] (Connection_ptr client)
-    {
-      printf("New client from %s\n", client->to_string().c_str());
-      auto* tls_client = new TLS_socket(client);
-
-      tls_client->on_connected = 
-      [] (TLS_socket& socket)
-      {
-        socket.on_read =
-        [&socket] (const uint8_t buf[], size_t buf_len)
-        {
-          printf("Data received from %s:\n%.*s\n", socket.to_string().c_str(), buf_len, buf);
-          // send response
-          socket.write("<html><body>Hello world</body><html>\r\n");
-          socket.close();
-        };
-      };
-      g_apps[client->remote()].reset(tls_client);
-
-      // When client is disconnecting
-      client->on_disconnect(
-      [] (Connection_ptr client, auto) {
-        printf("Disconnected from %s\n", client->to_string().c_str());
-        g_apps.erase(client->remote());
-      });
-    });
+    server.on_connect(new_client);
 
     kernel_sanity_checks();
   });
