@@ -19,6 +19,7 @@
 // IncludeOS
 #include <service>
 #include <net/inet4>
+#include <memdisk>
 
 // Std
 #include <cstdio>
@@ -34,6 +35,7 @@
 
 #include <botan/ecdh.h>
 #include <botan/ecdsa.h>
+#include <botan/pkcs8.h>
 #include <botan/pk_algs.h>
 #include <botan/x509cert.h>
 #include <botan/x509self.h>
@@ -41,8 +43,6 @@
 #include <botan/x509path.h>
 #include <botan/tls_server.h>
 #include <botan/tls_callbacks.h>
-
-#include <memdisk>
 
 using Connection_ptr = net::tcp::Connection_ptr;
 using ConnectCB = net::tcp::Connection::ConnectCallback;
@@ -55,7 +55,6 @@ static auto& get_rng()
   return g_rng;
 }
 
-// Copied straight from tests...
 class Credentials_Manager_Test : public Botan::Credentials_Manager
 {
 public:
@@ -111,8 +110,8 @@ public:
     return m_server_key.get();
   }
 
-  Botan::SymmetricKey psk(const std::string& type,
-        const std::string& context,
+  Botan::SymmetricKey psk(const std::string&,
+        const std::string&,
         const std::string&) override
   {
     //if (type == "tls-server" && context == "session-ticket")
@@ -138,50 +137,6 @@ std::string time_string(time_t time)
   return std::string(buff, len);
 }
 
-/**
- * 1. create private key 1 <CA>
- * 2. create self-signed certificate <CA> with private key 1
- * 3. create private key 2 <server>
- * 4. create certificate request <req> with private key 2
- * 5. create CA with <CA> key and <CA> cert
- * 6, create certificate <server> by signing <req>
- * 
-**/
-Botan::Credentials_Manager* create_creds(Botan::RandomNumberGenerator& rng)
-{
-  printf("Creating private key...\n");
-  Botan::EC_Group ec_params("secp256r1");
-  std::unique_ptr<Botan::Private_Key> ca_key(new Botan::ECDSA_PrivateKey(rng, ec_params));
-  
-  Botan::X509_Cert_Options ca_opts;
-  ca_opts.common_name = "Test CA";
-  ca_opts.country = "VT";
-  ca_opts.CA_key(1);
-
-  auto ca_cert = Botan::X509::create_self_signed_cert(
-          ca_opts, *ca_key, "SHA-256", rng);
-
-  std::unique_ptr<Botan::Private_Key> server_key(new Botan::ECDSA_PrivateKey(rng, ec_params));
-
-  Botan::X509_Cert_Options server_opts;
-  server_opts.common_name = "server.example.com";
-  server_opts.country = "VT";
-
-  auto req = Botan::X509::create_cert_req(
-          server_opts, *server_key, "SHA-256", rng);
-
-  Botan::X509_CA ca(ca_cert, *ca_key, "SHA-256", rng);
-
-  auto now = std::chrono::system_clock::now();
-  Botan::X509_Time start_time(now);
-  Botan::X509_Time end_time(now + years(1));
-
-  auto server_cert = ca.sign_request(
-            req, rng, start_time, end_time);
-
-  return new Credentials_Manager_Test(server_cert, ca_cert, std::move(server_key));
-}
-
 static Botan::Credentials_Manager* credman = nullptr;
 static auto& get_credentials()
 {
@@ -195,22 +150,17 @@ static auto& get_credentials()
  * 6, create certificate <server> by signing <req>
  * 
 **/
-#include <botan/rsa.h>
-void create_creds(const std::vector<uint8_t>& vec_ca_key,
-                  const std::vector<uint8_t>& vec_ca_cert)
+void create_creds(std::unique_ptr<Botan::Private_Key> ca_key,
+                  Botan::X509_Certificate& ca_cert,
+                  std::unique_ptr<Botan::Private_Key> server_key)
 {
   auto& rng = get_rng();
-  Botan::X509_Certificate ca_cert(vec_ca_cert);
-  std::unique_ptr<Botan::Private_Key> ca_key(new Botan::RSA_PrivateKey(rng, 4096));
-  
+
   //  X509_CA(const X509_Certificate& ca_cert,
   //          const Private_Key&      pkey,
   //          const std::string&      hash_fn,
   //          RandomNumberGenerator&  rng);
   Botan::X509_CA ca(ca_cert, *ca_key, "SHA-256", get_rng());
-
-  // server private key
-  std::unique_ptr<Botan::Private_Key> server_key(new Botan::RSA_PrivateKey(rng, 4096));
 
   // create server certificate from CA
   auto now = std::chrono::system_clock::now();
@@ -231,7 +181,6 @@ void create_creds(const std::vector<uint8_t>& vec_ca_key,
                 server_cert, ca_cert, std::move(server_key));
 }
 
-
 class TLS_socket : public Botan::TLS::Callbacks
 {
 public:
@@ -244,16 +193,17 @@ public:
   {
     m_socket->on_read(8192, 
     [this] (auto buf, size_t n) {
-      this->on_client_write(buf.get(), n);
+      this->tls_receive(buf.get(), n);
     });
   }
 
-  void on_client_write(const uint8_t* buf, size_t n)
+  void tls_receive(const uint8_t* buf, const size_t n)
   {
     try
     {
-      printf("Finished processing (rem: %u)\n",
-             this->m_tls.received_data(buf, n));
+      int rem = this->m_tls.received_data(buf, n);
+      (void) rem;
+      //printf("Finished processing (rem: %u)\n", rem);
     }
     catch(Botan::Exception& e)
     {
@@ -274,70 +224,39 @@ public:
           alert.type_string().c_str());
   }
 
-  bool tls_session_established(const Botan::TLS::Session& session) override
+  bool tls_session_established(const Botan::TLS::Session&) override
   {
-    printf("Handshake complete, %s with %s\n",
-          session.version().to_string().c_str(),
-          session.ciphersuite().to_string().c_str());
-
-    if (!session.session_id().empty())
-        printf("Session ID %s\n", Botan::hex_encode(session.session_id()).c_str());
-    
+    // return true to store session
     return true;
   }
 
   void tls_emit_data(const uint8_t buf[], size_t len) override
   {
-    printf("Emit %d\n", len);
     m_socket->write(buf, len);
   }
 
-  void tls_record_received(uint64_t rec_no, const uint8_t buf[], size_t buf_len) override
+  void tls_record_received(uint64_t, const uint8_t buf[], size_t buf_len) override
   {
-    printf("%d bytes in record %llu\n", buf_len, rec_no);
-    m_hash.update(buf, buf_len);
-    std::string reply = "H(" + Botan::hex_encode(buf, buf_len) + ") = " +
-      Botan::hex_encode(m_hash.final());
-
-    printf("Replying %s\n", reply.c_str());
-    m_tls.send(reply);
+    printf("Data received from %s:\n%.*s\n", m_socket->to_string().c_str(), buf_len, buf);
   }
 
-  void send(const std::string& text)
+  void tls_session_activated() override
+  {
+    on_connected(*this);
+  }
+
+  void write(const std::string& text)
   {
     m_tls.send(text);
   }
 
-  void tls_verify_cert_chain(
-    const std::vector<Botan::X509_Certificate>& cert_chain,
-    const std::vector<std::shared_ptr<const Botan::OCSP::Response>>& ocsp_responses,
-    const std::vector<Botan::Certificate_Store*>& trusted_roots,
-    Botan::Usage_Type usage,
-    const std::string& hostname,
-    const Botan::TLS::Policy& policy) override
-   {
-      if(cert_chain.empty())
-        throw Botan::Invalid_Argument("Certificate chain was empty");
+  void close()
+  {
+    m_socket->close();
+  }
 
-      Botan::Path_Validation_Restrictions restrictions(
-                policy.require_cert_revocation_info(),
-                policy.minimum_signature_strength());
-
-      Botan::Path_Validation_Result result =
-        x509_path_validate(cert_chain,
-                          restrictions,
-                          trusted_roots,
-                          (usage == Botan::Usage_Type::TLS_SERVER_AUTH ? hostname : ""),
-                          usage,
-                          std::chrono::system_clock::now(),
-                          tls_verify_cert_chain_ocsp_timeout(),
-                          ocsp_responses);
-
-      if (!result.successful_validation())
-        throw Botan::Exception("Certificate validation failure: " + result.result_string());
-      printf("Cert chain validated\n");
-    }
-
+public:
+  delegate<void(TLS_socket&)> on_connected;
 private:
   Botan::RandomNumberGenerator& m_rng;
   Botan::Credentials_Manager&   m_creds;
@@ -346,11 +265,19 @@ private:
 
   Botan::TLS::Server m_tls;
   Connection_ptr m_socket;
-  Botan::SHA_256 m_hash;
 };
 static std::map<net::tcp::Socket, std::unique_ptr<TLS_socket>> g_apps;
 
 extern "C" void kernel_sanity_checks();
+
+std::unique_ptr<Botan::Private_Key> read_private_key(
+      fs::File_system& fs, const std::string& filepath)
+{
+  auto key_file = fs.read_file(filepath);
+  assert(key_file);
+  Botan::DataSource_Memory data{key_file.data(), key_file.size()};
+  return std::unique_ptr<Botan::Private_Key>(Botan::PKCS8::load_key(data, get_rng()));
+}
 
 void Service::start()
 {
@@ -360,46 +287,47 @@ void Service::start()
     { 10,0,0,1 },       // Gateway
     { 8,8,8,8 });       // DNS
 
+  // Set up a TCP server on port 443
+  auto& server = inet.tcp().bind(443);
+  printf("Server listening on %s\n", server.local().to_string().c_str());
+
   auto disk = fs::new_shared_memdisk();
   disk->init_fs(
-  [] (auto err, auto& filesys) {
+  [&server] (auto err, auto& filesys) {
     assert(!err);
 
-    auto key_file = filesys.read_file("/test.key");
-    assert(key_file);
-    std::vector<uint8_t> key_vec(
-                key_file.data(), key_file.data() + key_file.size());
-
+    // CA certificate
     auto der_cert = filesys.read_file("/test.der");
     assert(der_cert);
-    std::vector<uint8_t> cert_vec(
+    std::vector<uint8_t> vec_ca_cert(
                 der_cert.data(), der_cert.data() + der_cert.size());
+    Botan::X509_Certificate ca_cert(vec_ca_cert);
+    // CA private key
+    auto ca_key = read_private_key(filesys, "/test.key");
+    // server private key
+    auto srv_key = read_private_key(filesys, "/server.key");
 
-    create_creds(key_vec, cert_vec);
+    create_creds(std::move(ca_key), ca_cert, std::move(srv_key));
 
-    // Set up a TCP server on port 443
-    auto& inet = net::Inet4::ifconfig<0> ();
-    auto& server = inet.tcp().bind(443);
-    printf("Server listening: %s\n", server.local().to_string().c_str());
+    server.on_connect(
+    [] (Connection_ptr client)
+    {
+      printf("New client from %s\n", client->to_string().c_str());
+      auto* tls_client = new TLS_socket(client);
+      tls_client->on_connected = 
+      [] (TLS_socket& socket) {
+        socket.write("<html><body>Hello world</body><html>\r\n");
+        socket.close();
+      };
+      g_apps[client->remote()].reset(tls_client);
 
-    using namespace Botan;
-    try {
-      server.on_connect(
-      [&inet] (Connection_ptr client) {
-        printf("New client: %s\n", client->to_string().c_str());
-        g_apps[client->remote()].reset(new TLS_socket(client));
-        //g_apps[client->remote()]->send("Hello world!\r\n");
-
-        // When client is disconnecting
-        client->on_disconnect([](Connection_ptr client, auto) {
-          printf("Disconnected from %s\n", client->to_string().c_str());
-          g_apps.erase(client->remote());
-          kernel_sanity_checks();
-        });
+      // When client is disconnecting
+      client->on_disconnect(
+      [] (Connection_ptr client, auto) {
+        printf("Disconnected from %s\n", client->to_string().c_str());
+        g_apps.erase(client->remote());
       });
-    } catch(std::exception e) {
-      printf("Botan TLS exception: %s\n", e.what());
-    }
+    });
 
     kernel_sanity_checks();
   });
