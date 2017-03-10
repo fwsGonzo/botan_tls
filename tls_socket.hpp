@@ -53,9 +53,13 @@ public:
 
   void tls_alert(Botan::TLS::Alert alert) override
   {
-    printf("Got a %s alert: %s\n",
-          (alert.is_fatal() ? "fatal" : "warning"),
-          alert.type_string().c_str());
+    // ignore close notifications
+    if (alert.type() != Botan::TLS::Alert::CLOSE_NOTIFY)
+    {
+      printf("Got a %s alert: %s\n",
+            (alert.is_fatal() ? "fatal" : "warning"),
+            alert.type_string().c_str());
+    }
   }
 
   bool tls_session_established(const Botan::TLS::Session&) override

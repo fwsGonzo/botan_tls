@@ -25,22 +25,10 @@
 #include "tls_socket.hpp"
 #include "credman.hpp"
 
-using ConnectCB = net::tcp::Connection::ConnectCallback;
-
 static inline auto& get_rng()
 {
   static auto& g_rng = Botan::system_rng();
   return g_rng;
-}
-
-std::string time_string(time_t time)
-{
-  struct tm* timeinfo;
-  timeinfo = localtime(&time);
-  
-  char buff[32];
-  int len = strftime(buff, sizeof(buff), "%b %d %H:%M", timeinfo);
-  return std::string(buff, len);
 }
 
 static Botan::Credentials_Manager* credman = nullptr;
@@ -49,12 +37,11 @@ static auto& get_credentials()
   return *credman;
 }
 
-
 static std::map<net::tcp::Socket, std::unique_ptr<TLS_socket>> g_apps;
 
 void new_client(Connection_ptr conn)
 {
-  printf("New client from %s\n", conn->to_string().c_str());
+  //printf("New client from %s\n", conn->to_string().c_str());
   // create TLS socket
   auto* tls_client = new TLS_socket(conn, get_rng(), get_credentials());
   // add to map of sockets in application
@@ -63,26 +50,26 @@ void new_client(Connection_ptr conn)
   tls_client->on_connected = 
   [] (TLS_socket& socket)
   {
-    printf("Connected to %s\n", socket.to_string().c_str());
+    printf("TLS connection to %s\n", socket.to_string().c_str());
   };
 
   tls_client->on_read =
   [tls_client] (const uint8_t buf[], size_t buf_len)
   {
-    printf("Data received from %s:\n%.*s\n", tls_client->to_string().c_str(), buf_len, buf);
+    printf("TLS data received from %s:\n%.*s\n", tls_client->to_string().c_str(), buf_len, buf);
     // send response
-    tls_client->write("<html><body>Hello world</body><html>\r\n");
+    tls_client->write("<html><body>Hello encrypted world!</body><html>\r\n");
     tls_client->close();
   };
 
   tls_client->on_disconnect =
   [] (TLS_socket& client) {
-    printf("Disconnected from %s\n", client.to_string().c_str());
+    printf("TLS disconnected from %s\n", client.to_string().c_str());
     g_apps.erase(client.get_remote());
   };
 }
 
-std::unique_ptr<Botan::Private_Key> read_private_key(
+inline std::unique_ptr<Botan::Private_Key> read_private_key(
       fs::File_system& fs, const std::string& filepath)
 {
   auto key_file = fs.read_file(filepath);
@@ -110,15 +97,15 @@ void Service::start()
   [&server] (auto err, auto& filesys) {
     assert(!err);
 
-    // CA certificate
+    // load CA certificate
     auto der_cert = filesys.read_file("/test.der");
     assert(der_cert);
     std::vector<uint8_t> vec_ca_cert(
                 der_cert.data(), der_cert.data() + der_cert.size());
     Botan::X509_Certificate ca_cert(vec_ca_cert);
-    // CA private key
+    // load CA private key
     auto ca_key = read_private_key(filesys, "/test.key");
-    // server private key
+    // load server private key
     auto srv_key = read_private_key(filesys, "/server.key");
 
     credman = Credman::create(
