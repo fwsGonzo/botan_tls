@@ -8,10 +8,10 @@
 
 using Connection_ptr = net::tcp::Connection_ptr;
 
-class TLS_socket : public Botan::TLS::Callbacks
+class TLS_server : public Botan::TLS::Callbacks
 {
 public:
-  TLS_socket(Connection_ptr remote,
+  TLS_server(Connection_ptr remote,
              Botan::RandomNumberGenerator& rng,
              Botan::Credentials_Manager& credman) :
     m_rng(rng),
@@ -31,6 +31,33 @@ public:
     });
   }
 
+  void write(const std::string& text)
+  {
+    m_tls.send(text);
+  }
+
+  void close()
+  {
+    m_socket->close();
+  }
+
+  std::string to_string() const {
+    return m_socket->to_string();
+  }
+
+  auto get_connection() noexcept {
+    return m_socket;
+  }
+  auto get_remote() noexcept {
+    return m_socket->remote();
+  }
+
+public:
+  delegate<void(TLS_server&)> on_connected;
+  delegate<void(TLS_server&)> on_disconnect;
+  delegate<void(const uint8_t[], size_t)> on_read = nullptr;
+
+protected:
   void tls_receive(const uint8_t* buf, const size_t n)
   {
     try
@@ -83,31 +110,6 @@ public:
     on_connected(*this);
   }
 
-  void write(const std::string& text)
-  {
-    m_tls.send(text);
-  }
-
-  void close()
-  {
-    m_socket->close();
-  }
-
-  std::string to_string() const {
-    return m_socket->to_string();
-  }
-
-  auto get_connection() noexcept {
-    return m_socket;
-  }
-  auto get_remote() noexcept {
-    return m_socket->remote();
-  }
-
-public:
-  delegate<void(TLS_socket&)> on_connected;
-  delegate<void(TLS_socket&)> on_disconnect;
-  delegate<void(const uint8_t[], size_t)> on_read = nullptr;
 private:
   Botan::RandomNumberGenerator& m_rng;
   Botan::Credentials_Manager&   m_creds;

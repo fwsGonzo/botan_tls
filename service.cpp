@@ -22,7 +22,7 @@
 #include <botan/system_rng.h>
 #include <botan/pkcs8.h>
 
-#include "tls_socket.hpp"
+#include "tls_server.hpp"
 #include "credman.hpp"
 
 static inline auto& get_rng()
@@ -37,18 +37,18 @@ static auto& get_credentials()
   return *credman;
 }
 
-static std::map<net::tcp::Socket, std::unique_ptr<TLS_socket>> g_apps;
+static std::map<net::tcp::Socket, std::unique_ptr<TLS_server>> g_apps;
 
 void new_client(Connection_ptr conn)
 {
   //printf("New client from %s\n", conn->to_string().c_str());
   // create TLS socket
-  auto* tls_client = new TLS_socket(conn, get_rng(), get_credentials());
+  auto* tls_client = new TLS_server(conn, get_rng(), get_credentials());
   // add to map of sockets in application
   g_apps[conn->remote()].reset(tls_client);
 
   tls_client->on_connected = 
-  [] (TLS_socket& socket)
+  [] (TLS_server& socket)
   {
     printf("TLS connection to %s\n", socket.to_string().c_str());
   };
@@ -63,7 +63,7 @@ void new_client(Connection_ptr conn)
   };
 
   tls_client->on_disconnect =
-  [] (TLS_socket& client) {
+  [] (TLS_server& client) {
     printf("TLS disconnected from %s\n", client.to_string().c_str());
     g_apps.erase(client.get_remote());
   };
