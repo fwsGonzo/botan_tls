@@ -1,80 +1,114 @@
-#pragma once
+// This file is a part of the IncludeOS unikernel - www.includeos.org
+//
+// Copyright 2015-2017 Oslo and Akershus University College of Applied Sciences
+// and Alfred Bratterud
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#include <net/tcp/connection.hpp>
+#pragma once
+#ifndef NET_TLS_SERVER_STREAM_HPP
+#define NET_TLS_SERVER_STREAM_HPP
+
 #include <botan/credentials_manager.h>
 #include <botan/rng.h>
 #include <botan/tls_server.h>
 #include <botan/tls_callbacks.h>
+#include <net/tcp/connection.hpp>
 
-using Connection_ptr = net::tcp::Connection_ptr;
-
-class TLS_server : public Botan::TLS::Callbacks
+namespace net
+{
+class TLS_server : public Botan::TLS::Callbacks, public tcp::Stream
 {
 public:
+  using Connection_ptr = tcp::Connection_ptr;
+
+
   TLS_server(Connection_ptr remote,
              Botan::RandomNumberGenerator& rng,
              Botan::Credentials_Manager& credman) :
+    tcp::Stream({remote}),
     m_rng(rng),
     m_creds(credman),
     m_session_manager(m_rng),
-    m_tls(*this, m_session_manager, m_creds, m_policy, m_rng),
-    m_socket(remote)
+    m_tls(*this, m_session_manager, m_creds, m_policy, m_rng)
   {
-    assert(m_socket);
-    m_socket->on_read(8192, 
+    assert(tcp->is_connected());
+  }
+
+  void on_read(size_t bs, ReadCallback cb) override
+  {
+    tcp->on_read(bs, 
     [this] (auto buf, size_t n) {
       this->tls_receive(buf.get(), n);
     });
-    m_socket->on_disconnect(
-    [this] (auto, auto) {
-      if (on_disconnect) on_disconnect(*this);
-    });
+    this->o_read = cb;
   }
-
-  void write(const std::string& text)
+  void on_write(WriteCallback cb) override
   {
-    m_tls.send(text);
+    this->o_write = cb;
   }
-
-  void close()
+  void on_connect(ConnectCallback cb) override
   {
-    m_socket->close();
+    this->o_connect = cb;
   }
 
-  std::string to_string() const {
-    return m_socket->to_string();
+  void write(const void* buf, size_t n) override
+  {
+    m_tls.send((uint8_t*) buf, n);
+  }
+  void write(const std::string& str) override
+  {
+    this->write(str.data(), str.size());
+  }
+  void write(Chunk ch) override
+  {
+    m_tls.send(ch.data(), ch.size());
+  }
+  void write(buffer_t buf, size_t n) override
+  {
+    m_tls.send(buf.get(), n);
   }
 
-  auto get_connection() noexcept {
-    return m_socket;
-  }
-  auto get_remote() noexcept {
-    return m_socket->remote();
+  std::string to_string() const override {
+    return tcp->to_string();
   }
 
-public:
-  delegate<void(TLS_server&)> on_connected;
-  delegate<void(TLS_server&)> on_disconnect;
-  delegate<void(const uint8_t[], size_t)> on_read = nullptr;
+  void reset_callbacks() override
+  {
+    o_connect = nullptr;
+    o_read  = nullptr;
+    o_write = nullptr;
+    tcp->reset_callbacks();
+  }
 
 protected:
   void tls_receive(const uint8_t* buf, const size_t n)
   {
     try
     {
-      int rem = this->m_tls.received_data(buf, n);
+      int rem = m_tls.received_data(buf, n);
       (void) rem;
       //printf("Finished processing (rem: %u)\n", rem);
     }
     catch(Botan::Exception& e)
     {
       printf("Fatal TLS error %s\n", e.what());
-      m_socket->close();
+      this->close();
     }
     catch(...)
     {
       printf("Unknown error!\n");
-      m_socket->close();
+      this->close();
     }
   }
 
@@ -97,25 +131,38 @@ protected:
 
   void tls_emit_data(const uint8_t buf[], size_t len) override
   {
-    m_socket->write(buf, len);
+    tcp->write(buf, len);
   }
 
   void tls_record_received(uint64_t, const uint8_t buf[], size_t buf_len) override
   {
-    if (on_read) on_read(buf, buf_len);
+    if (o_read)
+    {
+      auto buffff = std::shared_ptr<uint8_t> (new uint8_t[buf_len]);
+      memcpy(buffff.get(), buf, buf_len);
+      
+      o_read(buffff, buf_len);
+    }
   }
 
   void tls_session_activated() override
   {
-    on_connected(*this);
+    o_connect(*this);
   }
 
 private:
+  Stream::ReadCallback    o_read;
+  Stream::WriteCallback   o_write;
+  Stream::ConnectCallback o_connect;
+
   Botan::RandomNumberGenerator& m_rng;
   Botan::Credentials_Manager&   m_creds;
   Botan::TLS::Strict_Policy     m_policy;
   Botan::TLS::Session_Manager_In_Memory m_session_manager;
 
   Botan::TLS::Server m_tls;
-  Connection_ptr m_socket;
 };
+
+} // net
+
+#endif

@@ -37,36 +37,36 @@ static auto& get_credentials()
   return *credman;
 }
 
-static std::map<net::tcp::Socket, std::unique_ptr<TLS_server>> g_apps;
+static std::map<net::tcp::Socket, std::unique_ptr<net::TLS_server>> g_apps;
 
-void new_client(Connection_ptr conn)
+void new_client(net::tcp::Connection_ptr conn)
 {
   //printf("New client from %s\n", conn->to_string().c_str());
   // create TLS socket
-  auto* tls_client = new TLS_server(conn, get_rng(), get_credentials());
+  auto* tls_client = new net::TLS_server(conn, get_rng(), get_credentials());
   // add to map of sockets in application
   g_apps[conn->remote()].reset(tls_client);
 
-  tls_client->on_connected = 
-  [] (TLS_server& socket)
+  tls_client->on_connect(
+  [] (net::Stream& stream)
   {
-    printf("TLS connection to %s\n", socket.to_string().c_str());
-  };
+    printf("TLS connection to %s\n", stream.to_string().c_str());
+  });
 
-  tls_client->on_read =
-  [tls_client] (const uint8_t buf[], size_t buf_len)
+  tls_client->on_read(8192,
+  [tls_client] (auto buf, size_t buf_len)
   {
-    printf("TLS data received from %s:\n%.*s\n", tls_client->to_string().c_str(), buf_len, buf);
+    printf("TLS data received from %s:\n%.*s\n", tls_client->to_string().c_str(), buf_len, buf.get());
     // send response
     tls_client->write("<html><body>Hello encrypted world!</body><html>\r\n");
     tls_client->close();
-  };
+  });
 
-  tls_client->on_disconnect =
-  [] (TLS_server& client) {
-    printf("TLS disconnected from %s\n", client.to_string().c_str());
-    g_apps.erase(client.get_remote());
-  };
+  tls_client->on_close(
+  [tls_client] {
+    printf("TLS disconnected from %s\n", tls_client->to_string().c_str());
+    g_apps.erase(tls_client->remote());
+  });
 }
 
 inline std::unique_ptr<Botan::Private_Key> read_private_key(
