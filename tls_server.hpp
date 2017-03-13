@@ -43,14 +43,13 @@ public:
     m_tls(*this, m_session_manager, m_creds, m_policy, m_rng)
   {
     assert(tcp->is_connected());
+    // default read callback
+    tcp->on_read(4096, {this, &TLS_server::tls_read});
   }
 
   void on_read(size_t bs, ReadCallback cb) override
   {
-    tcp->on_read(bs, 
-    [this] (auto buf, size_t n) {
-      this->tls_receive(buf.get(), n);
-    });
+    tcp->on_read(bs, {this, &TLS_server::tls_read});
     this->o_read = cb;
   }
   void on_write(WriteCallback cb) override
@@ -92,6 +91,11 @@ public:
   }
 
 protected:
+  void tls_read(buffer_t buf, const size_t n)
+  {
+    this->tls_receive(buf.get(), n);
+  }
+
   void tls_receive(const uint8_t* buf, const size_t n)
   {
     try
@@ -147,7 +151,7 @@ protected:
 
   void tls_session_activated() override
   {
-    o_connect(*this);
+    if (o_connect) o_connect(*this);
   }
 
 private:

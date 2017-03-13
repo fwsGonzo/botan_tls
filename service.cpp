@@ -25,49 +25,7 @@
 #include "tls_server.hpp"
 #include "credman.hpp"
 
-static inline auto& get_rng()
-{
-  static auto& g_rng = Botan::system_rng();
-  return g_rng;
-}
-
-static Botan::Credentials_Manager* credman = nullptr;
-static auto& get_credentials()
-{
-  return *credman;
-}
-
-static std::map<net::tcp::Socket, std::unique_ptr<net::TLS_server>> g_apps;
-
-void new_client(net::tcp::Connection_ptr conn)
-{
-  //printf("New client from %s\n", conn->to_string().c_str());
-  // create TLS socket
-  auto* tls_client = new net::TLS_server(conn, get_rng(), get_credentials());
-  // add to map of sockets in application
-  g_apps[conn->remote()].reset(tls_client);
-
-  tls_client->on_connect(
-  [] (net::Stream& stream)
-  {
-    printf("TLS connection to %s\n", stream.to_string().c_str());
-  });
-
-  tls_client->on_read(8192,
-  [tls_client] (auto buf, size_t buf_len)
-  {
-    printf("TLS data received from %s:\n%.*s\n", tls_client->to_string().c_str(), buf_len, buf.get());
-    // send response
-    tls_client->write("<html><body>Hello encrypted world!</body><html>\r\n");
-    tls_client->close();
-  });
-
-  tls_client->on_close(
-  [tls_client] {
-    printf("TLS disconnected from %s\n", tls_client->to_string().c_str());
-    g_apps.erase(tls_client->remote());
-  });
-}
+inline static auto& get_rng() { return Botan::system_rng(); }
 
 inline std::unique_ptr<Botan::Private_Key> read_private_key(
       fs::File_system& fs, const std::string& filepath)
@@ -77,6 +35,8 @@ inline std::unique_ptr<Botan::Private_Key> read_private_key(
   Botan::DataSource_Memory data{key_file.data(), key_file.size()};
   return std::unique_ptr<Botan::Private_Key>(Botan::PKCS8::load_key(data, get_rng()));
 }
+
+#include "http_tls_server.hpp"
 
 extern "C" void kernel_sanity_checks();
 
@@ -88,13 +48,9 @@ void Service::start()
     { 10,0,0,1 },       // Gateway
     { 8,8,8,8 });       // DNS
 
-  // Set up a TCP server on port 443
-  auto& server = inet.tcp().bind(443);
-  printf("Server listening on %s\n", server.local().to_string().c_str());
-
   auto disk = fs::new_shared_memdisk();
   disk->init_fs(
-  [&server] (auto err, auto& filesys) {
+  [&inet] (auto err, auto& filesys) {
     assert(!err);
 
     // load CA certificate
@@ -108,13 +64,24 @@ void Service::start()
     // load server private key
     auto srv_key = read_private_key(filesys, "/server.key");
 
-    credman = Credman::create(
+    auto* credman = net::Credman::create(
             get_rng(),
             std::move(ca_key),
             ca_cert,
             std::move(srv_key));
 
-    server.on_connect(new_client);
+    // Set up a TCP server on port 443
+    static http::Secure_HTTP httpd(
+        *credman, get_rng(), inet.tcp(),
+
+    [] (auto req, auto resp) {
+      
+      resp->write_header(http::Not_Found);
+      resp->write("<html><body>Hello encrypted world!</body><html>\r\n");
+
+    });
+
+    httpd.listen(443);
 
     kernel_sanity_checks();
   });
