@@ -19,24 +19,8 @@
 #include <net/inet4>
 #include <memdisk>
 #include <cstdio>
-#include <botan/system_rng.h>
-#include <botan/pkcs8.h>
 
-#include "tls_server.hpp"
-#include "credman.hpp"
-
-inline static auto& get_rng() { return Botan::system_rng(); }
-
-inline std::unique_ptr<Botan::Private_Key> read_private_key(
-      fs::File_system& fs, const std::string& filepath)
-{
-  auto key_file = fs.read_file(filepath);
-  assert(key_file);
-  Botan::DataSource_Memory data{key_file.data(), key_file.size()};
-  return std::unique_ptr<Botan::Private_Key>(Botan::PKCS8::load_key(data, get_rng()));
-}
-
-#include "http_tls_server.hpp"
+#include <https>
 
 extern "C" void kernel_sanity_checks();
 
@@ -48,39 +32,28 @@ void Service::start()
     { 10,0,0,1 },       // Gateway
     { 8,8,8,8 });       // DNS
 
-  auto disk = fs::new_shared_memdisk();
-  disk->init_fs(
+  fs::memdisk().init_fs(
   [&inet] (auto err, auto& filesys) {
     assert(!err);
 
     // load CA certificate
-    auto der_cert = filesys.read_file("/test.der");
-    assert(der_cert);
-    std::vector<uint8_t> vec_ca_cert(
-                der_cert.data(), der_cert.data() + der_cert.size());
-    Botan::X509_Certificate ca_cert(vec_ca_cert);
+    auto ca_cert = filesys.stat("/test.der");
     // load CA private key
-    auto ca_key = read_private_key(filesys, "/test.key");
+    auto ca_key  = filesys.stat("/test.key");
     // load server private key
-    auto srv_key = read_private_key(filesys, "/server.key");
-
-    auto* credman = net::Credman::create(
-            get_rng(),
-            std::move(ca_key),
-            ca_cert,
-            std::move(srv_key));
+    auto srv_key = filesys.stat("/server.key");
 
     // Set up a TCP server on port 443
-    static http::Secure_HTTP httpd(
-        *credman, get_rng(), inet.tcp(),
+    static http::Secure_server httpd(
+        ca_key, ca_cert, srv_key, inet.tcp(),
 
     [] (auto req, auto resp) {
       
+      (void) req;
       resp->write_header(http::Not_Found);
       resp->write("<html><body>Hello encrypted world!</body><html>\r\n");
 
     });
-
     httpd.listen(443);
 
     kernel_sanity_checks();
