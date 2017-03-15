@@ -37,7 +37,6 @@ set(DRIVERS
 
 set(LIBRARIES
     "$ENV{INCLUDEOS_PREFIX}/includeos/lib/libbotan-2.a"
-    "../../LiveUpdate/build/libliveupdate.a"
     )
 
 # include service build script
