@@ -45,10 +45,11 @@ void Service::start()
 
     // Set up a TCP server on port 443
     static http::Secure_server httpd(
-        ca_key, ca_cert, srv_key, inet.tcp(),
+        "blabla.com", ca_key, ca_cert, srv_key, inet.tcp());
 
+    httpd.on_request(
     [] (auto req, auto resp) {
-      
+
       (void) req;
       resp->write_header(http::Not_Found);
       resp->write("<html><body>Hello encrypted world!</body><html>\r\n");
