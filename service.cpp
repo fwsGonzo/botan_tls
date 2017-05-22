@@ -21,6 +21,8 @@
 #include <cstdio>
 
 #include <https>
+#include "tls_client.hpp"
+#include "client_credman.hpp"
 
 extern "C" void kernel_sanity_checks();
 
@@ -45,7 +47,8 @@ void Service::start()
 
     // Set up a TCP server on port 443
     static http::Secure_server httpd(
-        "blabla.com", ca_key, ca_cert, srv_key, inet.tcp());
+        inet.tcp().address().to_string(), // server name
+        ca_key, ca_cert, srv_key, inet.tcp());
 
     httpd.on_request(
     [] (auto req, auto resp) {
@@ -57,6 +60,19 @@ void Service::start()
     });
     httpd.listen(443);
 
+    /**
+    static auto* credman = net::Client_creds::create(filesys, "/certs");
+
+    auto conn = inet.tcp().connect({{10,0,0,1}, 8001});
+    conn->on_connect(
+    [] (auto conn) {
+      printf("Connected!\n");
+
+      new net::tls::Client(conn, Botan::system_rng(), *credman);
+
+    });
+    */
     kernel_sanity_checks();
   });
+
 }
